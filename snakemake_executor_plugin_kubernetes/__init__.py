@@ -57,6 +57,15 @@ class ExecutorSettings(ExecutorSettingsBase):
             "when using Google Cloud GKE Autopilot."
         },
     )
+    persistent_volume_claims: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": "List of persistent volumes to mount to the pod. "
+            "Each item in the list should be a string in the format "
+            "'volume_name:/path/in/container'.",
+            "nargs": "+"
+        },
+    )
 
 
 # Required:
@@ -84,7 +93,10 @@ common_settings = CommonSettings(
 # Implementation of your executor
 class Executor(RemoteExecutor):
     def __post_init__(self):
-        kubernetes.config.load_kube_config()
+        try:
+            kubernetes.config.load_kube_config()
+        except kubernetes.config.config_exception.ConfigException:
+            kubernetes.config.load_incluster_config()
 
         self.k8s_cpu_scalar = self.workflow.executor_settings.cpu_scalar
         self.k8s_service_account_name = (
@@ -102,6 +114,17 @@ class Executor(RemoteExecutor):
         self.log_path.mkdir(exist_ok=True, parents=True)
         self.container_image = self.workflow.remote_execution_settings.container_image
         self.logger.info(f"Using {self.container_image} for Kubernetes jobs.")
+
+        # Raise an error if the persistent_volume_claims exist and are not in the correct format
+        if self.workflow.executor_settings.persistent_volume_claims:
+            for claim in self.workflow.executor_settings.persistent_volume_claims:
+                if len(claim.split(":")) != 2:
+                    raise WorkflowError(
+                        f"Invalid format for persistent_volume_claims: {claim}. "
+                        "Each item in the list should be a string in the format "
+                        "'volume_name:/path/in/container'."
+
+        self.persistent_volume_claims = self.workflow.executor_settings.persistent_volume_claims
 
     def run_job(self, job: JobExecutorInterface):
         # Implement here how to run a job.
@@ -136,6 +159,16 @@ class Executor(RemoteExecutor):
             kubernetes.client.V1VolumeMount(name="workdir", mount_path="/workdir"),
         ]
 
+        # Add persistent volume claims if provided
+        if self.persistent_volume_claims:
+            for claim in self.persistent_volume_claims:
+                volume_name, mount_path = claim.split(":")
+                container.volume_mounts.append(
+                    kubernetes.client.V1VolumeMount(
+                        name=volume_name, mount_path=mount_path
+                    )
+                )
+
         node_selector = {}
         if "machine_type" in job.resources.keys():
             # Kubernetes labels a node by its instance type using this node_label.
@@ -156,6 +189,16 @@ class Executor(RemoteExecutor):
         workdir_volume = kubernetes.client.V1Volume(name="workdir")
         workdir_volume.empty_dir = kubernetes.client.V1EmptyDirVolumeSource()
         body.spec.volumes = [workdir_volume]
+
+        # Add persistent volume claims if provided
+        if self.persistent_volume_claims:
+            for claim in self.persistent_volume_claims:
+                volume_name, _ = claim.split(":")
+                volume = kubernetes.client.V1Volume(name=volume_name)
+                volume.persistent_volume_claim = kubernetes.client.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=volume_name
+                )
+                body.spec.volumes.append(volume)
 
         # env vars
         container.env = []
