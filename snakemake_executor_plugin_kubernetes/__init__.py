@@ -123,6 +123,7 @@ class Executor(RemoteExecutor):
                         f"Invalid format for persistent_volume_claims: {claim}. "
                         "Each item in the list should be a string in the format "
                         "'volume_name:/path/in/container'."
+                    )
 
         self.persistent_volume_claims = self.workflow.executor_settings.persistent_volume_claims
 
